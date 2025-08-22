@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Генератор текста по когорте, спринту и проекту</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      display: grid;
+      grid-template-columns: 1fr 2fr;
+      gap: 20px;
+      padding: 20px;
+      background: #f6f7f9;
+    }
+    .card {
+      border: 1px solid #e5e7eb;
+      border-radius: 12px;
+      padding: 16px;
+      background: #fff;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.06);
+    }
+    textarea {
+      width: 100%;
+      height: 280px;
+      font-family: inherit;
+    }
+    .btn {
+      margin-top: 10px;
+      padding: 8px 12px;
+      border: none;
+      background: #2563eb;
+      color: white;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    .btn:hover { background: #1d4ed8; }
+    .hint { font-size: 13px; color: #6b7280; }
+    label { display:block; margin: 8px 0 6px; }
+    input { width: 100%; padding: 8px 10px; border:1px solid #e5e7eb; border-radius:8px; }
+    .grid2 { display:grid; grid-template-columns:1fr 1fr; gap: 12px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h3>Введите данные</h3>
+    <label>Когорта: <input id="cohort" type="number" placeholder="110"></label>
+    <div class="grid2">
+      <div><label>Спринт: <input id="sprint" type="number" placeholder="3"></label></div>
+      <div><label>Проект (1–6, фс, фс2): <input id="project" type="text" placeholder="1 или фс"></label></div>
+    </div>
+    <p class="hint">Правила: дедлайн спринта = старт следующего события + 6 дней; дедлайн проекта = старт + 13 дней. Если дата старта сегодня — «начался сегодня», если в прошлом — «начался», иначе — «начнётся DD.MM.YYYY».</p>
+    <p class="hint"><b>Важно:</b> в коде задайте переменную <code>CSV_URL</code> ссылкой на опубликованный CSV Google Sheets.</p>
+  </div>
+
+  <div class="card">
+    <h3>Сгенерированный текст</h3>
+    <textarea id="result" readonly></textarea>
+    <button class="btn" onclick="copyText()">Скопировать</button>
+  </div>
+
+  <script>
+    const result = document.getElementById("result");
+    const cohortInput = document.getElementById("cohort");
+    const sprintInput = document.getElementById("sprint");
+    const projectInput = document.getElementById("project");
+
+    // ВСТАВЬТЕ СЮДА ССЫЛКУ НА CSV (Google Sheets → Файл → Публиковать в Интернете → CSV)
+    const CSV_URL = "ВАША_ССЫЛКА_НА_CSV";
+
+    // Хранилище: eventsByCohort[cohort] = [{type:'sprint'|'project'|'final', num?, start: Date}, ...] по возрастанию даты
+    const eventsByCohort = {};
+
+    // Разбор даты DD.MM.YYYY
+    function parseDate(str) {
+      if (!str) return null;
+      const m = String(str).trim().match(/^([0-3]?\d)[./-]([01]?\d)[./-](\d{2}|\d{4})$/);
+      if (!m) return null;
+      let [, d, mo, y] = m;
+      d = +d; mo = +mo - 1; y = +y;
+      if (y < 100) y += 2000;
+      const dt = new Date(y, mo, d);
+      return isNaN(dt) ? null : dt;
+    }
+    function fmt(dt) {
+      const dd = String(dt.getDate()).padStart(2, '0');
+      const mm = String(dt.getMonth()+1).padStart(2, '0');
+      const yy = dt.getFullYear();
+      return `${dd}.${mm}.${yy}`;
+    }
+    function addDays(dt, n){ const x = new Date(dt.getTime()); x.setDate(x.getDate()+n); return x; }
+    function sameDay(a,b){ return a&&b&&a.getDate()==b.getDate()&&a.getMonth()==b.getMonth()&&a.getFullYear()==b.getFullYear(); }
+
+    // Под конкретную структуру CSV из примера:
+    // col0: программа; col1: куратора; col2: номер когорты; col3: дата старта курса; col4: выпуск;
+    // даты спринтов/проектов начинаются с col5 (индекс 5) и далее справа
+    function parseCsv(txt){
+      const rows = txt.trim().split(/\r?\n/).map(r => r.split(","));
+      for (const r of rows) {
+        if (!r[2]) continue; // нет когорты
+        const cohort = (r[2]||"").trim();
+        if (!/^[0-9]+$/.test(cohort)) continue;
+        // собираем все даты справа, начиная с колонки 5
+        const dates = [];
+        for (let i = 5; i < r.length; i++) {
+          const d = parseDate(r[i]);
+          if (d) dates.push(d);
+        }
+        if (!dates.length) continue;
+        dates.sort((a,b)=>a-b);
+        // формируем последовательность событий: сначала спринты (по порядку),
+        // затем вставки проектов на тех позициях, где они идут в исходной таблице.
+        // Так как структура проектов в примере не размечена явным текстом,
+        // по умолчанию считаем все как спринты — дедлайн = старт следующего +6.
+        // При необходимости можно вручную пометить проекты: events.push({type:'project', start: d});
+        const events = dates.map((d, idx) => ({ type: 'sprint', num: idx+1, start: d }));
+        eventsByCohort[cohort] = events;
+      }
+    }
+
+    function formatStartText(startDate) {
+      const today = new Date(); today.setHours(0,0,0,0);
+      const s = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate());
+      if (sameDay(s, today)) return "начался сегодня";
+      if (s < today) return "начался";
+      return `начнётся ${fmt(s)}`;
+    }
+
+    // Дедлайн: спринт → старт следующего +6 дней; если нет следующего — берём тот же +6 (заглушка).
+    // Проект → старт +13 дней.
+    function getDeadline(cohort, ev) {
+      const list = eventsByCohort[cohort] || [];
+      const idx = list.indexOf(ev);
+      if (ev.type === 'sprint') {
+        if (idx >=0 && idx < list.length - 1) {
+          return addDays(list[idx+1].start, 6);
+        } else {
+          return addDays(ev.start, 6); // если нет следующего события в данных
+        }
+      }
+      if (ev.type === 'project' || ev.type === 'final') {
+        return addDays(ev.start, 13);
+      }
+      return null;
+    }
+
+    function getText(cohort, sprint, project) {
+      if ((sprint && project) || (!sprint && !project)) {
+        return "Ошибка: введите либо спринт, либо проект, но не оба одновременно.";
+      }
+      if (!cohort || !eventsByCohort[cohort]) {
+        return cohort ? `Когорта ${cohort} не найдена.` : "Введите номер когорты.";
+      }
+
+      if (sprint) {
+        const ev = (eventsByCohort[cohort]||[]).find(e => e.type==='sprint' && e.num == sprint);
+        if (!ev) return `Для когорты ${cohort} спринт ${sprint} не найден.`;
+        const dl = getDeadline(cohort, ev);
+        return `Могу предложить тебе выйти в ${cohort} когорту, где ${sprint} спринт ${formatStartText(ev.start)}, а дедлайн будет ${fmt(dl)}.`;
+      }
+
+      if (project) {
+        const key = String(project).toLowerCase();
+        const label = (key==='фс'||key==='fs'||key==='фс2'||key==='fs2') ? 'Финальный проект' : 'Итоговый проект';
+        // В текущем CSV проекты не размечены — возьмём для примера «следующее событие после указанного номера спринта»,
+        // либо первое событие в списке. Для рабочего сценария проекты нужно помечать в CSV.
+        const ev = (eventsByCohort[cohort]||[])[0];
+        if (!ev) return `Для когорты ${cohort} дата старта проекта не найдена.`;
+        const dl = addDays(ev.start, 13);
+        return `Могу предложить тебе выйти в ${cohort} когорту, где ${label} ${formatStartText(ev.start)}, а дедлайн будет ${fmt(dl)}.`;
+      }
+    }
+
+    function update() {
+      const cohort = (cohortInput.value||'').trim();
+      const sprint = (sprintInput.value||'').trim();
+      const project = (projectInput.value||'').trim();
+      result.value = getText(cohort, sprint, project);
+    }
+
+    cohortInput.addEventListener("input", update);
+    sprintInput.addEventListener("input", update);
+    projectInput.addEventListener("input", update);
+
+    function copyText() {
+      result.select();
+      document.execCommand("copy");
+      alert("Текст скопирован!");
+    }
+
+    // Загрузка CSV при старте
+    fetch(CSV_URL).then(r=>r.text()).then(t=>{ parseCsv(t); update(); }).catch(console.error);
+  </script>
+</body>
+</html>
