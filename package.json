@@ -1,0 +1,13 @@
+{
+  "name": "cohort-text-gen",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test10": "node test/test10.puppeteer.js"
+  },
+  "devDependencies": {
+    "jsdom": "^24.1.0",
+    "puppeteer": "^23.9.0"
+  }
+}
